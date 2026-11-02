@@ -148,10 +148,13 @@ class PromptIREngine(private val context: Context) {
      */
     fun warmUp(mode: ExecutionMode = ExecutionMode.FULL_GPU) {
         runCatching {
-            getMappedModelBuffer()
-            if (!isRunningOnEmulator() && mode == ExecutionMode.FULL_GPU) {
+            val buffer = getMappedModelBuffer()
+            if (mode == ExecutionMode.FULL_CPU && cachedHolder == null) {
                 synchronized(lock) {
-                    getOrCreateInterpreter(mode)
+                    if (cachedHolder == null) {
+                        cachedHolder = createCpuInterpreter(buffer, mode)
+                        cachedMode = mode
+                    }
                 }
             }
         }

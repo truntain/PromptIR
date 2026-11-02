@@ -88,7 +88,7 @@ MyApp/
 ### Yêu cầu hệ thống
 - **Android Studio:** Ladybug / Koala hoặc mới hơn.
 - **JDK:** Java 11 trở lên.
-- **Android SDK:** `compileSdk = 36`, `minSdk = 26` (Android 8.0+).
+- **Android SDK:** `minSdk = 29` (**Android 10.0 trở lên**), `targetSdk = 35`.
 - **Git LFS:** Bắt buộc để tải đầy đủ 3 file mô hình `.tflite` từ GitHub.
 
 ### Bước 1: Clone dự án (kèm Git LFS)

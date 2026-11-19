@@ -27,8 +27,8 @@ import kotlin.math.abs
 import kotlin.math.pow
 import android.graphics.Color as AndroidColor
 
-/** Cạnh dài tối đa của ảnh người dùng chọn, tránh OutOfMemory và thời gian tiling quá lâu. */
-private const val MAX_USER_IMAGE_DIMENSION = 1024
+/** Cạnh dài tối đa của ảnh người dùng chọn (640px giúp chế độ Đa mảnh chỉ cần tối đa 4-9 mảnh thay vì 25 mảnh, chạy nhanh gấp 3 lần trên di động). */
+private const val MAX_USER_IMAGE_DIMENSION = 640
 private const val PROJECTS_DIR_NAME = "studio_projects"
 
 /**

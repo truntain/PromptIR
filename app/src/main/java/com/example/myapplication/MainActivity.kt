@@ -64,6 +64,8 @@ class MainActivity : ComponentActivity() {
                     onRestore = viewModel::restore,
                     onCancel = viewModel::cancelActiveTask,
                     onSave = viewModel::saveRestored,
+                    onShare = viewModel::shareRestored,
+                    onRenameProject = viewModel::renameCurrentProject,
                     onSelectExecutionMode = viewModel::setExecutionMode,
                     onSelectFastMode = viewModel::setFastMode,
                     onRunBenchmark = viewModel::runBenchmark,

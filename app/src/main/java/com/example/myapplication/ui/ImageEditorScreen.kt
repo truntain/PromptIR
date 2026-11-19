@@ -22,14 +22,19 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -87,6 +93,8 @@ fun ImageEditorScreen(
     onRestore: () -> Unit,
     onCancel: () -> Unit,
     onSave: () -> Unit,
+    onShare: () -> Unit = {},
+    onRenameProject: (String) -> Unit = {},
     onSelectExecutionMode: (ExecutionMode) -> Unit,
     onSelectFastMode: (Boolean) -> Unit,
     onRunBenchmark: () -> Unit,
@@ -98,6 +106,7 @@ fun ImageEditorScreen(
     var showDiagnostics by rememberSaveable { mutableStateOf(false) }
     var showSampleSheet by rememberSaveable { mutableStateOf(false) }
     var showFullRestored by rememberSaveable { mutableStateOf(false) }
+    var showRenameDialog by rememberSaveable { mutableStateOf(false) }
 
     // Khi đang ở màn hình Editor, bấm nút Back hệ thống sẽ quay về trang chủ dự án (như CapCut)
     BackHandler(enabled = state.activeScreen == StudioScreen.EDITOR) {
@@ -148,13 +157,15 @@ fun ImageEditorScreen(
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
-                // --- 1. TOP STUDIO BAR (Nút quay lại Home + Tên dự án + Tốc độ + Lưu ảnh) ---
+                // --- 1. TOP STUDIO BAR (Nút quay lại Home + Tên dự án (chạm để đổi tên) + Tốc độ + Chia sẻ + Lưu ảnh) ---
                 StudioTopBar(
                     state = state,
                     onBackToHome = onNavigateHome,
+                    onRenameClick = { showRenameDialog = true },
                     onToggleFastMode = { onSelectFastMode(!state.fastMode) },
                     onOpenGallery = onPickFromGallery,
                     onOpenDiagnostics = { showDiagnostics = true },
+                    onShare = onShare,
                     onSave = onSave
                 )
 
@@ -262,10 +273,22 @@ fun ImageEditorScreen(
                         onRestore()
                     },
                     onSave = onSave,
+                    onShare = onShare,
                     onCancel = onCancel
                 )
             }
         }
+    }
+
+    if (showRenameDialog) {
+        RenameProjectDialog(
+            currentTitle = state.currentProjectTitle.ifBlank { "Dự án mới" },
+            onConfirm = { newTitle ->
+                showRenameDialog = false
+                onRenameProject(newTitle)
+            },
+            onDismiss = { showRenameDialog = false }
+        )
     }
 
     if (showSampleSheet) {
@@ -301,15 +324,17 @@ fun ImageEditorScreen(
 
 /**
  * Top Bar của màn hình chỉnh sửa:
- * Nút Quay lại Home + Tên dự án + Chip Tốc độ (Nhanh/HD) + Đổi ảnh + Phân tích + Lưu vào thư viện
+ * Nút Quay lại Home + Tên dự án (chạm để đổi tên) + Chip Tốc độ (Nhanh/HD) + Đổi ảnh + Phân tích + Chia sẻ + Lưu vào thư viện
  */
 @Composable
 private fun StudioTopBar(
     state: StudioUiState,
     onBackToHome: () -> Unit,
+    onRenameClick: () -> Unit,
     onToggleFastMode: () -> Unit,
     onOpenGallery: () -> Unit,
     onOpenDiagnostics: () -> Unit,
+    onShare: () -> Unit,
     onSave: () -> Unit
 ) {
     Row(
@@ -320,10 +345,10 @@ private fun StudioTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        // Cụm trái: Nút Back về Home + Tên dự án + Huy hiệu Nhanh/HD (không bao giờ bị ép chữ)
+        // Cụm trái: Nút Back về Home + Tên dự án (chạm để đổi tên) + Huy hiệu Nhanh/HD
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier
                 .weight(1f)
                 .padding(end = 4.dp)
@@ -334,14 +359,35 @@ private fun StudioTopBar(
                 onClick = onBackToHome
             )
 
-            Text(
-                text = state.currentProjectTitle.ifBlank { "Dự án mới" },
-                style = MaterialTheme.typography.titleMedium,
-                color = StudioTextPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false)
-            )
+            Row(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(
+                        enabled = !state.isBusy,
+                        role = Role.Button,
+                        onClick = onRenameClick
+                    )
+                    .padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = state.currentProjectTitle.ifBlank { "Dự án mới" },
+                    style = MaterialTheme.typography.titleMedium,
+                    color = StudioTextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Icon(
+                    painter = painterResource(R.drawable.ic_studio_edit),
+                    contentDescription = "Đổi tên dự án",
+                    tint = StudioTextSecondary,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
 
             Box(
                 modifier = Modifier
@@ -354,7 +400,7 @@ private fun StudioTopBar(
                         RoundedCornerShape(8.dp)
                     )
                     .clickable(enabled = !state.isBusy, role = Role.Button, onClick = onToggleFastMode)
-                    .padding(horizontal = 10.dp),
+                    .padding(horizontal = 8.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -367,10 +413,10 @@ private fun StudioTopBar(
             }
         }
 
-        // Cụm phải: Đổi ảnh khác từ máy, Mở bảng YOLO & Benchmark, Xuất ảnh ra Gallery
+        // Cụm phải: Đổi ảnh, Benchmark/YOLO, Chia sẻ nhanh, Xuất ảnh ra Gallery
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
+            horizontalArrangement = Arrangement.spacedBy(0.dp)
         ) {
             StudioIconButton(
                 iconRes = R.drawable.ic_studio_photo_library,
@@ -385,16 +431,77 @@ private fun StudioTopBar(
                 onClick = onOpenDiagnostics
             )
 
-            val canSave = state.restored != null && !state.isBusy && !state.isSaving
+            val canExport = state.restored != null && !state.isBusy && !state.isSaving
+            StudioIconButton(
+                iconRes = R.drawable.ic_studio_share,
+                contentDescription = "Chia sẻ nhanh ảnh đã khôi phục",
+                enabled = canExport,
+                tint = if (canExport) StudioAccent else StudioTextSecondary,
+                onClick = onShare
+            )
+
             StudioIconButton(
                 iconRes = R.drawable.ic_studio_download,
                 contentDescription = "Xuất ảnh ra Thư viện máy",
-                enabled = canSave,
-                tint = if (canSave) StudioSuccess else StudioTextSecondary,
+                enabled = canExport,
+                tint = if (canExport) StudioSuccess else StudioTextSecondary,
                 onClick = onSave
             )
         }
     }
+}
+
+@Composable
+private fun RenameProjectDialog(
+    currentTitle: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember(currentTitle) { mutableStateOf(currentTitle) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = StudioSurface,
+        titleContentColor = StudioTextPrimary,
+        textContentColor = StudioTextSecondary,
+        title = {
+            Text(
+                text = "Đổi tên dự án",
+                style = MaterialTheme.typography.titleMedium,
+                color = StudioTextPrimary
+            )
+        },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                label = { Text("Tên dự án") },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = StudioTextPrimary,
+                    unfocusedTextColor = StudioTextPrimary,
+                    focusedBorderColor = StudioAccent,
+                    unfocusedBorderColor = StudioBorder,
+                    focusedLabelColor = StudioAccent,
+                    unfocusedLabelColor = StudioTextSecondary,
+                    cursorColor = StudioAccent
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(text.trim().ifBlank { currentTitle }) }
+            ) {
+                Text("Lưu tên", color = StudioAccent)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Hủy", color = StudioTextSecondary)
+            }
+        }
+    )
 }
 
 /**
@@ -478,6 +585,7 @@ private fun BottomStudioDock(
     onOpenDemoSamples: () -> Unit,
     onRestore: () -> Unit,
     onSave: () -> Unit,
+    onShare: () -> Unit,
     onCancel: () -> Unit
 ) {
     val filterModes = RestorationFilterMode.entries
@@ -591,7 +699,7 @@ private fun BottomStudioDock(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     StudioSecondaryButton(
@@ -602,8 +710,16 @@ private fun BottomStudioDock(
                         modifier = Modifier.height(52.dp)
                     )
 
+                    StudioSecondaryButton(
+                        text = "Chia sẻ",
+                        iconRes = R.drawable.ic_studio_share,
+                        enabled = !isBusy && !isSaving,
+                        onClick = onShare,
+                        modifier = Modifier.height(52.dp)
+                    )
+
                     StudioPrimaryButton(
-                        text = if (isSaving) "Đang lưu ảnh..." else "Lưu ảnh về máy",
+                        text = if (isSaving) "Đang lưu..." else "Lưu về máy",
                         onClick = onSave,
                         enabled = !isBusy && !isSaving,
                         iconRes = R.drawable.ic_studio_download,

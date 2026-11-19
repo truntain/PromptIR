@@ -36,6 +36,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import com.example.myapplication.BenchmarkResult
 import com.example.myapplication.ExecutionMode
+import com.example.myapplication.PromptIREngine
 import com.example.myapplication.R
 import com.example.myapplication.StudioUiState
 import com.example.myapplication.YoloBatchEvaluationResult
@@ -199,9 +200,11 @@ private fun HardwareAndBenchmarkContent(
     StudioDivider()
 
     // 4. Benchmark 3 chế độ
+    val warmupCount = PromptIREngine.BENCHMARK_WARMUP_RUNS
+    val measureCount = PromptIREngine.BENCHMARK_MEASURE_RUNS
     SectionHeader(
         title = "Benchmark tốc độ suy luận",
-        subtitle = "Đo tốc độ xử lý trên patch 256×256 trung tâm (2 lần warm-up + 10 lần đo chính thức)"
+        subtitle = "Đo tốc độ xử lý trên patch 256×256 trung tâm ($warmupCount lần warm-up + $measureCount lần đo chính thức)"
     )
 
     val benchmarkFraction = if (state.isBenchmarking && state.benchmarkTotal > 0) {
@@ -210,7 +213,11 @@ private fun HardwareAndBenchmarkContent(
 
     val benchmarkBtnLabel = if (state.isBenchmarking) {
         val m = state.benchmarkMode?.shortLabel ?: "..."
-        "Đang đo $m (${state.benchmarkRun}/${state.benchmarkTotal})"
+        if (state.benchmarkRun == 0) {
+            "Đang warm-up $m (0/${state.benchmarkTotal})"
+        } else {
+            "Đang đo $m (${state.benchmarkRun}/${state.benchmarkTotal})"
+        }
     } else {
         "Chạy Benchmark 3 chế độ"
     }

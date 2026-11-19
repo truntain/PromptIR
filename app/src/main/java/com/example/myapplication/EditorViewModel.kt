@@ -84,7 +84,7 @@ data class StudioUiState(
     val isBenchmarking: Boolean = false,
     val benchmarkMode: ExecutionMode? = null,
     val benchmarkRun: Int = 0,
-    val benchmarkTotal: Int = 10,
+    val benchmarkTotal: Int = PromptIREngine.BENCHMARK_MEASURE_RUNS,
     val benchmarkResults: List<BenchmarkResult>? = null,
 
     val yoloTask: YoloTaskMode = YoloTaskMode.OBJECT_DETECTION,
@@ -123,6 +123,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private var loadJob: Job? = null
     private var activeTaskJob: Job? = null
+    private var persistJob: Job? = null
 
     /**
      * Lưu kết quả đầu ra thuần từ mạng PromptIR cho bức ảnh hiện tại.
@@ -202,7 +203,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
 
-            // Tự động cập nhật lại dự án trong lịch sử "Dự án đã chỉnh sửa"
+            // Tự động cập nhật lại dự án trong lịch sử (chỉ ghi lại after.webp, không ghi đè base.webp và before.webp)
             persistCurrentProject(
                 before = inputBitmap,
                 neuralBase = baseBitmap,
@@ -210,7 +211,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 mode = mode,
                 durationMs = state.restoration?.totalTimeMs ?: 0L,
                 initialPsnr = state.initialPsnr,
-                restoredPsnr = psnr
+                restoredPsnr = psnr,
+                saveNeuralBase = false
             )
         }
     }
@@ -284,6 +286,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun renameCurrentProject(newTitle: String) {
+        val clean = newTitle.trim()
+        if (clean.isEmpty()) return
+        val projId = _uiState.value.currentProjectId
+        _uiState.update { it.copy(currentProjectTitle = clean) }
+        if (projId != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                if (renameSavedProject(app, projId, clean)) {
+                    val updated = loadSavedProjects(app)
+                    _uiState.update { it.copy(savedProjects = updated) }
+                }
+            }
+        }
+    }
+
     private fun persistCurrentProject(
         before: Bitmap,
         neuralBase: Bitmap,
@@ -291,9 +308,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         mode: RestorationFilterMode,
         durationMs: Long,
         initialPsnr: Double?,
-        restoredPsnr: Double?
+        restoredPsnr: Double?,
+        saveNeuralBase: Boolean = true
     ) {
-        viewModelScope.launch(Dispatchers.IO) {
+        persistJob?.cancel()
+        persistJob = viewModelScope.launch(Dispatchers.IO) {
             val state = _uiState.value
             val saved = saveOrUpdateEditedProject(
                 context = app,
@@ -305,7 +324,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 mode = mode,
                 durationMs = durationMs,
                 initialPsnr = initialPsnr,
-                restoredPsnr = restoredPsnr
+                restoredPsnr = restoredPsnr,
+                saveNeuralBase = saveNeuralBase
             )
             if (saved != null) {
                 val allProjects = loadSavedProjects(app)
@@ -430,7 +450,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 currentProjectId = null,
                 currentProjectTitle = projTitle,
                 selectedCategory = categoryIndex,
-                selectedFilterMode = cat.defaultFilterMode,
+                selectedFilterMode = RestorationFilterMode.AUTO_AI,
                 input = input,
                 groundTruth = groundTruth,
                 selectedSample = if (hasPair) fileName else null,
@@ -466,9 +486,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (state.isBusy) return
 
         val expectedTiles = if (state.fastMode) 1 else {
-            val padW = (256 - (input.width % 256)) % 256
-            val padH = (256 - (input.height % 256)) % 256
-            ((input.width + padW) / 256) * ((input.height + padH) / 256)
+            val xTiles = PromptIREngine.computeTileStarts(maxOf(input.width, PromptIREngine.PATCH_SIZE)).size
+            val yTiles = PromptIREngine.computeTileStarts(maxOf(input.height, PromptIREngine.PATCH_SIZE)).size
+            xTiles * yTiles
         }
 
         _uiState.update { it.copy(isRestoring = true, tilesDone = 0, tilesTotal = expectedTiles) }
@@ -504,8 +524,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val result = engine.restoreImage(
             inputBitmap = input,
             mode = mode,
-            fastMode = fastMode,
-            referenceHint = groundTruth
+            fastMode = fastMode
         ) { done, total, partialBitmap ->
             if (_uiState.value.isRestoring) {
                 _uiState.update {
@@ -544,7 +563,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             mode = filterMode,
             durationMs = finalResult.totalTimeMs,
             initialPsnr = _uiState.value.initialPsnr,
-            restoredPsnr = psnr
+            restoredPsnr = psnr,
+            saveNeuralBase = true
         )
 
         return finalRestored
@@ -558,7 +578,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (state.isBusy) return
 
         _uiState.update {
-            it.copy(isBenchmarking = true, benchmarkResults = null, benchmarkRun = 0, benchmarkMode = null)
+            it.copy(
+                isBenchmarking = true,
+                benchmarkResults = null,
+                benchmarkRun = 0,
+                benchmarkTotal = PromptIREngine.BENCHMARK_MEASURE_RUNS,
+                benchmarkMode = ExecutionMode.FULL_GPU
+            )
         }
         activeTaskJob = viewModelScope.launch(Dispatchers.Default) {
             try {
@@ -680,7 +706,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    // --- Lưu ảnh ra thư viện máy ---
+    // --- Lưu ảnh ra thư viện máy & Chia sẻ nhanh ---
 
     fun saveRestored() {
         val state = _uiState.value
@@ -696,6 +722,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 if (ok) "Đã xuất ảnh vào Thư viện (Pictures/PromptIR)"
                 else "Chưa lưu được ảnh. Kiểm tra dung lượng trống rồi thử lại."
             )
+        }
+    }
+
+    fun shareRestored() {
+        val state = _uiState.value
+        val restored = state.restored ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val title = state.currentProjectTitle.ifBlank { "PromptIR" }
+            val ok = shareRestoredBitmap(app, restored, title)
+            if (!ok) {
+                _messages.send("Không thể mở bảng chia sẻ ảnh trên thiết bị này.")
+            }
         }
     }
 }

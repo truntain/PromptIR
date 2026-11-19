@@ -125,11 +125,26 @@ fun BeforeAfterViewer(
             return@BoxWithConstraints
         }
 
+        val imgW = before.width.toFloat().coerceAtLeast(1f)
+        val imgH = before.height.toFloat().coerceAtLeast(1f)
+        val fitScale = minOf(widthPx / imgW, heightPx / imgH)
+        val fittedW = imgW * fitScale
+        val fittedH = imgH * fitScale
+        val baseLeft = (widthPx - fittedW) / 2f
+        val baseRight = baseLeft + fittedW
+        val cx = widthPx / 2f
+
         fun clamp(value: Offset, zoom: Float): Offset {
-            val maxX = (zoom - 1f) * widthPx / 2f
-            val maxY = (zoom - 1f) * heightPx / 2f
+            val maxX = (zoom - 1f) * fittedW / 2f
+            val maxY = (zoom - 1f) * fittedH / 2f
             return Offset(value.x.coerceIn(-maxX, maxX), value.y.coerceIn(-maxY, maxY))
         }
+
+        // Vùng ngang thực tế của bức ảnh trên màn hình (tính cả ContentScale.Fit + Zoom + Pan)
+        val drawnLeft = ((baseLeft - cx) * scale + cx + offset.x).coerceIn(0f, widthPx)
+        val drawnRight = ((baseRight - cx) * scale + cx + offset.x).coerceIn(drawnLeft + 1f, widthPx)
+        val drawnWidth = (drawnRight - drawnLeft).coerceAtLeast(1f)
+        val splitX = drawnLeft + drawnWidth * split
 
         val comparing = after != null && !showFullRestored
         val baseImage = after ?: before
@@ -146,17 +161,19 @@ fun BeforeAfterViewer(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(widthPx, heightPx) {
+                .pointerInput(widthPx, heightPx, fittedW, fittedH) {
                     detectTransformGestures { _, pan, zoom, _ ->
                         val newScale = (scale * zoom).coerceIn(1f, MAX_ZOOM)
                         offset = clamp(offset + pan, newScale)
                         scale = newScale
                     }
                 }
-                .pointerInput(comparing, widthPx) {
+                .pointerInput(comparing, drawnLeft, drawnWidth, widthPx, heightPx) {
                     detectTapGestures(
                         onTap = { position ->
-                            if (comparing) split = (position.x / widthPx).coerceIn(0f, 1f)
+                            if (comparing) {
+                                split = ((position.x - drawnLeft) / drawnWidth).coerceIn(0f, 1f)
+                            }
                         },
                         onDoubleTap = { position ->
                             if (scale > 1.01f) {
@@ -180,12 +197,12 @@ fun BeforeAfterViewer(
             )
 
             if (comparing) {
-                // Cắt theo toạ độ khung (không bị phóng to) để mép cắt luôn trùng đường chia
+                // Cắt chính xác trong phạm vi ngang thực tế [drawnLeft, drawnRight] của ảnh
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .drawWithContent {
-                            clipRect(right = size.width * split) {
+                            clipRect(right = splitX) {
                                 this@drawWithContent.drawContent()
                             }
                         }
@@ -202,9 +219,9 @@ fun BeforeAfterViewer(
 
         if (comparing) {
             SplitHandle(
-                splitX = widthPx * split,
+                splitX = splitX,
                 split = split,
-                onDrag = { dx -> split = (split + dx / widthPx).coerceIn(0f, 1f) }
+                onDrag = { dx -> split = (split + dx / drawnWidth).coerceIn(0f, 1f) }
             )
 
             if (!isProcessing) {

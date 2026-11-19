@@ -94,6 +94,9 @@ class YoloEvaluator(private val context: Context) {
 
         private const val INPUT_SIZE = 640
         private const val NUM_CLASSES = 80
+        /** Ngưỡng độ tự tin đồng nhất giữa ảnh Suy giảm, ảnh Khôi phục và ảnh Ground Truth để tránh False Positive oan. */
+        internal const val DEFAULT_CONF_THRESHOLD = 0.25f
+        internal const val DEFAULT_NMS_IOU_THRESHOLD = 0.45f
 
         val COCO_CLASSES = arrayOf(
             "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
@@ -110,6 +113,157 @@ class YoloEvaluator(private val context: Context) {
         fun getClassColor(classId: Int): Int {
             val hsv = floatArrayOf((classId * 137.508f) % 360f, 0.85f, 0.95f)
             return Color.HSVToColor(hsv)
+        }
+
+        internal fun calculateIoU(a: YoloDetection, b: YoloDetection): Float {
+            val interX1 = maxOf(a.x1, b.x1)
+            val interY1 = maxOf(a.y1, b.y1)
+            val interX2 = minOf(a.x2, b.x2)
+            val interY2 = minOf(a.y2, b.y2)
+
+            val interW = maxOf(0f, interX2 - interX1)
+            val interH = maxOf(0f, interY2 - interY1)
+            val interArea = interW * interH
+
+            val areaA = maxOf(0f, a.x2 - a.x1) * maxOf(0f, a.y2 - a.y1)
+            val areaB = maxOf(0f, b.x2 - b.x1) * maxOf(0f, b.y2 - b.y1)
+            val unionArea = areaA + areaB - interArea
+
+            if (unionArea <= 0f) return 0f
+            return interArea / unionArea
+        }
+
+        internal fun applyNms(
+            candidates: List<YoloDetection>,
+            iouThreshold: Float = DEFAULT_NMS_IOU_THRESHOLD
+        ): List<YoloDetection> {
+            val results = mutableListOf<YoloDetection>()
+            val grouped = candidates.groupBy { it.classId }
+
+            for ((_, classCandidates) in grouped) {
+                val sorted = classCandidates.sortedByDescending { it.score }.toMutableList()
+                while (sorted.isNotEmpty()) {
+                    val best = sorted.removeAt(0)
+                    results.add(best)
+                    sorted.removeAll { candidate ->
+                        calculateIoU(best, candidate) >= iouThreshold
+                    }
+                }
+            }
+            return results.sortedByDescending { it.score }
+        }
+
+        /**
+         * Tính toán mAP@0.5 và mAP@0.5:0.95 dựa trên dự đoán so với Ground-Truth.
+         */
+        internal fun calculateMapMetrics(
+            predictions: List<YoloDetection>,
+            gtDetections: List<YoloDetection>
+        ): Pair<Double, Double> {
+            if (gtDetections.isEmpty()) {
+                return if (predictions.isEmpty()) Pair(1.0, 1.0) else Pair(0.0, 0.0)
+            }
+
+            val iouThresholds = listOf(0.50f, 0.55f, 0.60f, 0.65f, 0.70f, 0.75f, 0.80f, 0.85f, 0.90f, 0.95f)
+            val mapAtThresholds = iouThresholds.map { iouThresh ->
+                calculateMapAtIouThreshold(predictions, gtDetections, iouThresh)
+            }
+
+            val map50 = mapAtThresholds[0]
+            val map50_95 = mapAtThresholds.average()
+            return Pair(map50, map50_95)
+        }
+
+        internal fun calculateMapAtIouThreshold(
+            predictions: List<YoloDetection>,
+            gtDetections: List<YoloDetection>,
+            iouThresh: Float
+        ): Double {
+            val uniqueClasses = gtDetections.map { it.classId }.toSet()
+            if (uniqueClasses.isEmpty()) return 1.0
+
+            val apList = mutableListOf<Double>()
+
+            for (c in uniqueClasses) {
+                val classGts = gtDetections.filter { it.classId == c }
+                val classPreds = predictions.filter { it.classId == c }.sortedByDescending { it.score }
+
+                if (classGts.isEmpty()) continue
+                if (classPreds.isEmpty()) {
+                    apList.add(0.0)
+                    continue
+                }
+
+                val gtMatched = BooleanArray(classGts.size)
+                val tp = FloatArray(classPreds.size)
+                val fp = FloatArray(classPreds.size)
+
+                for (pIdx in classPreds.indices) {
+                    val pred = classPreds[pIdx]
+                    var maxIoU = 0f
+                    var maxGtIdx = -1
+
+                    for (gIdx in classGts.indices) {
+                        val iou = calculateIoU(pred, classGts[gIdx])
+                        if (iou > maxIoU) {
+                            maxIoU = iou
+                            maxGtIdx = gIdx
+                        }
+                    }
+
+                    if (maxIoU >= iouThresh && maxGtIdx >= 0 && !gtMatched[maxGtIdx]) {
+                        tp[pIdx] = 1f
+                        gtMatched[maxGtIdx] = true
+                    } else {
+                        fp[pIdx] = 1f
+                    }
+                }
+
+                var cumTp = 0f
+                var cumFp = 0f
+                val recalls = FloatArray(classPreds.size)
+                val precisions = FloatArray(classPreds.size)
+
+                for (i in classPreds.indices) {
+                    cumTp += tp[i]
+                    cumFp += fp[i]
+                    recalls[i] = cumTp / classGts.size
+                    precisions[i] = cumTp / (cumTp + cumFp)
+                }
+
+                val ap = calculateAucFromPrecisionRecall(recalls, precisions)
+                apList.add(ap)
+            }
+
+            return if (apList.isNotEmpty()) apList.average() else 0.0
+        }
+
+        internal fun calculateAucFromPrecisionRecall(recalls: FloatArray, precisions: FloatArray): Double {
+            if (recalls.isEmpty()) return 0.0
+
+            val mRec = FloatArray(recalls.size + 2)
+            val mPre = FloatArray(precisions.size + 2)
+
+            mRec[0] = 0f
+            mPre[0] = 0f
+            for (i in recalls.indices) {
+                mRec[i + 1] = recalls[i]
+                mPre[i + 1] = precisions[i]
+            }
+            mRec[mRec.size - 1] = 1.0f
+            mPre[mPre.size - 1] = 0f
+
+            for (i in mPre.size - 2 downTo 0) {
+                mPre[i] = maxOf(mPre[i], mPre[i + 1])
+            }
+
+            var auc = 0.0
+            for (i in 1 until mRec.size) {
+                if (mRec[i] != mRec[i - 1]) {
+                    auc += (mRec[i] - mRec[i - 1]) * mPre[i]
+                }
+            }
+            return auc
         }
     }
 
@@ -192,25 +346,29 @@ class YoloEvaluator(private val context: Context) {
         val interpreter = getOrCreateDetInterpreter()
         val hasGt = gtBitmap != null
 
-        // 1. Chạy phát hiện đối tượng (Nếu ảnh người dùng không có GT thì chỉ chạy trên ảnh Gốc & ảnh Khôi phục)
+        // 1. Chạy phát hiện đối tượng với cùng ngưỡng DEFAULT_CONF_THRESHOLD đồng nhất
         checkCancelled()
-        val degradedDetections = runDetectionOnBitmap(interpreter, degradedBitmap, confThreshold = 0.20f)
+        val degradedDetections = runDetectionOnBitmap(interpreter, degradedBitmap, confThreshold = DEFAULT_CONF_THRESHOLD)
         checkCancelled()
-        val restoredDetections = runDetectionOnBitmap(interpreter, restoredBitmap, confThreshold = 0.20f)
+        val restoredDetections = runDetectionOnBitmap(interpreter, restoredBitmap, confThreshold = DEFAULT_CONF_THRESHOLD)
         checkCancelled()
         val gtDetections = if (gtBitmap != null) {
-            runDetectionOnBitmap(interpreter, gtBitmap, confThreshold = 0.40f)
+            runDetectionOnBitmap(interpreter, gtBitmap, confThreshold = DEFAULT_CONF_THRESHOLD)
         } else {
-            restoredDetections
+            emptyList()
         }
         checkCancelled()
 
-        // 2. Tính mAP@0.5 và mAP@0.5:0.95
-        val (degMap50, degMap50_95) = calculateMapMetrics(degradedDetections, gtDetections)
+        // 2. Chỉ tính mAP@0.5 và mAP@0.5:0.95 khi thực sự có ảnh chuẩn Ground Truth
+        val (degMap50, degMap50_95) = if (hasGt) {
+            calculateMapMetrics(degradedDetections, gtDetections)
+        } else {
+            0.0 to 0.0
+        }
         val (resMap50, resMap50_95) = if (hasGt) {
             calculateMapMetrics(restoredDetections, gtDetections)
         } else {
-            1.0 to 1.0
+            0.0 to 0.0
         }
 
         // 3. Vẽ Bounding Box chứa thông tin nhãn lên Bitmap (nếu cần hiển thị UI)
@@ -267,25 +425,44 @@ class YoloEvaluator(private val context: Context) {
         val interpreter = getOrCreateSegInterpreter()
         val hasGt = gtBitmap != null
 
-        // 1. Chạy Segmentation (Nếu ảnh người dùng không có GT thì chỉ chạy trên ảnh Gốc & ảnh Khôi phục)
+        // 1. Chạy Segmentation với cùng ngưỡng DEFAULT_CONF_THRESHOLD đồng nhất
         checkCancelled()
-        val degradedDetections = runSegmentationOnBitmap(interpreter, degradedBitmap, confThreshold = 0.20f, generateMasks = generateAnnotatedBitmaps)
+        val degradedDetections = runSegmentationOnBitmap(
+            interpreter,
+            degradedBitmap,
+            confThreshold = DEFAULT_CONF_THRESHOLD,
+            generateMasks = generateAnnotatedBitmaps
+        )
         checkCancelled()
-        val restoredDetections = runSegmentationOnBitmap(interpreter, restoredBitmap, confThreshold = 0.20f, generateMasks = generateAnnotatedBitmaps)
+        val restoredDetections = runSegmentationOnBitmap(
+            interpreter,
+            restoredBitmap,
+            confThreshold = DEFAULT_CONF_THRESHOLD,
+            generateMasks = generateAnnotatedBitmaps
+        )
         checkCancelled()
         val gtDetections = if (gtBitmap != null) {
-            runSegmentationOnBitmap(interpreter, gtBitmap, confThreshold = 0.40f, generateMasks = generateAnnotatedBitmaps)
+            runSegmentationOnBitmap(
+                interpreter,
+                gtBitmap,
+                confThreshold = DEFAULT_CONF_THRESHOLD,
+                generateMasks = generateAnnotatedBitmaps
+            )
         } else {
-            restoredDetections
+            emptyList()
         }
         checkCancelled()
 
-        // 2. Tính mAP@0.5 và mAP@0.5:0.95
-        val (degMap50, degMap50_95) = calculateMapMetrics(degradedDetections, gtDetections)
+        // 2. Chỉ tính mAP@0.5 và mAP@0.5:0.95 khi thực sự có ảnh chuẩn Ground Truth
+        val (degMap50, degMap50_95) = if (hasGt) {
+            calculateMapMetrics(degradedDetections, gtDetections)
+        } else {
+            0.0 to 0.0
+        }
         val (resMap50, resMap50_95) = if (hasGt) {
             calculateMapMetrics(restoredDetections, gtDetections)
         } else {
-            1.0 to 1.0
+            0.0 to 0.0
         }
 
         // 3. Vẽ Bounding Box & Mask phân đoạn lên Bitmap (nếu cần hiển thị UI)
@@ -348,8 +525,8 @@ class YoloEvaluator(private val context: Context) {
             onProgress(i + 1, imagePairs.size)
             val (degraded, gt) = imagePairs[i]
 
-            // 1. Tự động khôi phục ảnh ở chế độ Nhanh (1 mảnh) để Batch Evaluation hoàn tất nhanh chóng
-            val restoration = engine.restoreImage(degraded, executionMode, fastMode = true, referenceHint = gt)
+            // 1. Khôi phục ảnh bằng mạng TFLite PromptIR thật (không truyền Ground Truth vào model)
+            val restoration = engine.restoreImage(degraded, executionMode, fastMode = true)
             checkCancelled()
 
             // 2. Chạy đánh giá YOLO (tiết kiệm bộ nhớ bằng cách không sinh Bitmap vẽ nhãn dư thừa)
@@ -772,158 +949,9 @@ class YoloEvaluator(private val context: Context) {
         val cropW = letterbox.newW.coerceIn(1, INPUT_SIZE - cropX)
         val cropH = letterbox.newH.coerceIn(1, INPUT_SIZE - cropY)
 
+        // Tạo và trả về bản sao đã lọc NMS
         val croppedMask = Bitmap.createBitmap(mask640, cropX, cropY, cropW, cropH)
         return Bitmap.createScaledBitmap(croppedMask, origW, origH, true)
-    }
-
-    // --- HÀM NMS & THUẬT TOÁN TÍNH CHỈ SỐ mAP ---
-
-    private fun applyNms(candidates: List<YoloDetection>, iouThreshold: Float): List<YoloDetection> {
-        val results = mutableListOf<YoloDetection>()
-        val grouped = candidates.groupBy { it.classId }
-
-        for ((_, classCandidates) in grouped) {
-            val sorted = classCandidates.sortedByDescending { it.score }.toMutableList()
-            while (sorted.isNotEmpty()) {
-                val best = sorted.removeAt(0)
-                results.add(best)
-                sorted.removeAll { candidate ->
-                    calculateIoU(best, candidate) >= iouThreshold
-                }
-            }
-        }
-        return results.sortedByDescending { it.score }
-    }
-
-    private fun calculateIoU(a: YoloDetection, b: YoloDetection): Float {
-        val interX1 = maxOf(a.x1, b.x1)
-        val interY1 = maxOf(a.y1, b.y1)
-        val interX2 = minOf(a.x2, b.x2)
-        val interY2 = minOf(a.y2, b.y2)
-
-        val interW = maxOf(0f, interX2 - interX1)
-        val interH = maxOf(0f, interY2 - interY1)
-        val interArea = interW * interH
-
-        val areaA = (a.x2 - a.x1) * (a.y2 - a.y1)
-        val areaB = (b.x2 - b.x1) * (b.y2 - b.y1)
-        val unionArea = areaA + areaB - interArea
-
-        if (unionArea <= 0f) return 0f
-        return interArea / unionArea
-    }
-
-    /**
-     * Tính toán mAP@0.5 và mAP@0.5:0.95 dựa trên dự đoán so với Ground-Truth.
-     */
-    private fun calculateMapMetrics(
-        predictions: List<YoloDetection>,
-        gtDetections: List<YoloDetection>
-    ): Pair<Double, Double> {
-        if (gtDetections.isEmpty()) {
-            return if (predictions.isEmpty()) Pair(1.0, 1.0) else Pair(0.0, 0.0)
-        }
-
-        val iouThresholds = listOf(0.50f, 0.55f, 0.60f, 0.65f, 0.70f, 0.75f, 0.80f, 0.85f, 0.90f, 0.95f)
-        val mapAtThresholds = iouThresholds.map { iouThresh ->
-            calculateMapAtIouThreshold(predictions, gtDetections, iouThresh)
-        }
-
-        val map50 = mapAtThresholds[0]
-        val map50_95 = mapAtThresholds.average()
-        return Pair(map50, map50_95)
-    }
-
-    private fun calculateMapAtIouThreshold(
-        predictions: List<YoloDetection>,
-        gtDetections: List<YoloDetection>,
-        iouThresh: Float
-    ): Double {
-        val uniqueClasses = gtDetections.map { it.classId }.toSet()
-        if (uniqueClasses.isEmpty()) return 1.0
-
-        val apList = mutableListOf<Double>()
-
-        for (c in uniqueClasses) {
-            val classGts = gtDetections.filter { it.classId == c }
-            val classPreds = predictions.filter { it.classId == c }.sortedByDescending { it.score }
-
-            if (classGts.isEmpty()) continue
-            if (classPreds.isEmpty()) {
-                apList.add(0.0)
-                continue
-            }
-
-            val gtMatched = BooleanArray(classGts.size)
-            val tp = FloatArray(classPreds.size)
-            val fp = FloatArray(classPreds.size)
-
-            for (pIdx in classPreds.indices) {
-                val pred = classPreds[pIdx]
-                var maxIoU = 0f
-                var maxGtIdx = -1
-
-                for (gIdx in classGts.indices) {
-                    val iou = calculateIoU(pred, classGts[gIdx])
-                    if (iou > maxIoU) {
-                        maxIoU = iou
-                        maxGtIdx = gIdx
-                    }
-                }
-
-                if (maxIoU >= iouThresh && maxGtIdx >= 0 && !gtMatched[maxGtIdx]) {
-                    tp[pIdx] = 1f
-                    gtMatched[maxGtIdx] = true
-                } else {
-                    fp[pIdx] = 1f
-                }
-            }
-
-            var cumTp = 0f
-            var cumFp = 0f
-            val recalls = FloatArray(classPreds.size)
-            val precisions = FloatArray(classPreds.size)
-
-            for (i in classPreds.indices) {
-                cumTp += tp[i]
-                cumFp += fp[i]
-                recalls[i] = cumTp / classGts.size
-                precisions[i] = cumTp / (cumTp + cumFp)
-            }
-
-            val ap = calculateAucFromPrecisionRecall(recalls, precisions)
-            apList.add(ap)
-        }
-
-        return if (apList.isNotEmpty()) apList.average() else 0.0
-    }
-
-    private fun calculateAucFromPrecisionRecall(recalls: FloatArray, precisions: FloatArray): Double {
-        if (recalls.isEmpty()) return 0.0
-
-        val mRec = FloatArray(recalls.size + 2)
-        val mPre = FloatArray(precisions.size + 2)
-
-        mRec[0] = 0f
-        mPre[0] = 0f
-        for (i in recalls.indices) {
-            mRec[i + 1] = recalls[i]
-            mPre[i + 1] = precisions[i]
-        }
-        mRec[mRec.size - 1] = 1.0f
-        mPre[mPre.size - 1] = 0f
-
-        for (i in mPre.size - 2 downTo 0) {
-            mPre[i] = maxOf(mPre[i], mPre[i + 1])
-        }
-
-        var auc = 0.0
-        for (i in 1 until mRec.size) {
-            if (mRec[i] != mRec[i - 1]) {
-                auc += (mRec[i] - mRec[i - 1]) * mPre[i]
-            }
-        }
-        return auc
     }
 
     // --- HÀM VẼ KẾT QUẢ VÀ TỔNG HỢP ---
